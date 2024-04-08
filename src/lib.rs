@@ -97,17 +97,23 @@ impl StorageBinding {
     }
 }
 
-const WRITE_BINDING: usize = 0;
-
 pub struct ComputeContext {
     pub compute_module: wgpu::ShaderModule,
     pub storage_bindings: Vec<StorageBinding>,
+    pub write_bindings: Vec<StorageBinding>,
     pub workgroups: [u32; 3],
 }
 
 impl ComputeContext {
+    fn bindings(&self) -> Vec<&StorageBinding> {
+        self.write_bindings
+            .iter()
+            .chain(&self.storage_bindings)
+            .collect()
+    }
+
     fn bind_group_layout_entries(&self) -> Vec<wgpu::BindGroupLayoutEntry> {
-        self.storage_bindings
+        self.bindings()
             .iter()
             .enumerate()
             .map(|(i, _)| wgpu::BindGroupLayoutEntry {
@@ -161,30 +167,8 @@ impl ComputeContext {
             })
     }
 
-    fn get_write_binding_size(&self) -> u64 {
-        self.storage_bindings
-            .get(WRITE_BINDING)
-            .unwrap()
-            .data_buffer
-            .data
-            .len() as u64
-    }
-
-    fn read_on_buffer(&self, device: &wgpu::Device) -> wgpu::Buffer {
-        device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: self.get_write_binding_size(),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        })
-    }
-
-    fn write_on_buffer(&self) -> &wgpu::Buffer {
-        &self.storage_bindings.get(WRITE_BINDING).unwrap().buffer
-    }
-
     fn buffer_entries(&self) -> Vec<wgpu::BindGroupEntry> {
-        self.storage_bindings
+        self.bindings()
             .iter()
             .enumerate()
             .map(|(i, binding)| wgpu::BindGroupEntry {
@@ -229,27 +213,68 @@ impl ComputeContext {
         );
     }
 
-    fn read_data(&self, read_on_buffer: wgpu::Buffer, context: Arc<Context>) -> ComputeBuffer {
-        let buffer_slice = read_on_buffer.slice(..);
-
-        buffer_slice.map_async(wgpu::MapMode::Read, |x| {
-            if x.is_err() {
-                println!("{:?}", x)
-            }
-        });
-
-        context.device.poll(wgpu::Maintain::Wait);
-
-        ComputeBuffer::new(
-            buffer_slice
-                .get_mapped_range()
-                .iter()
-                .cloned()
-                .collect::<Vec<u8>>(),
-        )
+    fn read_buffers(&self, device: &wgpu::Device) -> Vec<wgpu::Buffer> {
+        self.write_bindings
+            .iter()
+            .map(|binding| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: binding.data_buffer.data.len() as u64,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect()
     }
 
-    pub async fn compute(&self, context: Arc<Context>) -> ComputeBuffer {
+    fn copy_write_to_read(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
+    ) -> Vec<wgpu::Buffer> {
+        let buffers = self.read_buffers(device);
+        buffers
+            .iter()
+            .zip(self.write_bindings.iter())
+            .for_each(|(read, write)| {
+                encoder.copy_buffer_to_buffer(
+                    &write.buffer,
+                    0,
+                    read,
+                    0,
+                    write.data_buffer.data.len() as u64,
+                );
+            });
+
+        buffers
+    }
+
+    fn read_output(&self, context: Arc<Context>, buffers: Vec<wgpu::Buffer>) -> Vec<ComputeBuffer> {
+        buffers
+            .iter()
+            .map(|read_buffer| {
+                let buffer_slice = read_buffer.slice(..);
+
+                buffer_slice.map_async(wgpu::MapMode::Read, |x| {
+                    if x.is_err() {
+                        println!("{:?}", x)
+                    }
+                });
+
+                context.device.poll(wgpu::Maintain::Wait);
+
+                ComputeBuffer::new(
+                    buffer_slice
+                        .get_mapped_range()
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<u8>>(),
+                )
+            })
+            .collect()
+    }
+
+    pub async fn compute(&self, context: Arc<Context>) -> Vec<ComputeBuffer> {
         let device = &context.device;
 
         let bind_group_layout = self.bind_group_layout(&context);
@@ -262,19 +287,25 @@ impl ComputeContext {
 
         self.begin_compute_pass(&mut encoder, &bind_group, &compute_pipeline);
 
-        let read_on_buffer = self.read_on_buffer(device);
-        let write_on_buffer = self.write_on_buffer();
-
-        encoder.copy_buffer_to_buffer(
-            write_on_buffer,
-            0,
-            &read_on_buffer,
-            0,
-            self.get_write_binding_size(),
-        );
+        let buffers = self.copy_write_to_read(&mut encoder, device);
 
         context.queue.submit(Some(encoder.finish()));
 
-        self.read_data(read_on_buffer, context)
+        self.read_output(context, buffers)
+
+        // let read_on_buffer = self.read_on_buffer(device);
+        // let write_on_buffer = self.write_on_buffer();
+
+        // encoder.copy_buffer_to_buffer(
+        //     write_on_buffer,
+        //     0,
+        //     &read_on_buffer,
+        //     0,
+        //     self.get_write_binding_size(),
+        // );
+
+        // context.queue.submit(Some(encoder.finish()));
+
+        // self.read_data(read_on_buffer, context)
     }
 }
