@@ -257,14 +257,14 @@ impl Matrix {
 /// Display
 ///
 
-const DISPLAY_VECTOR_SIZE: usize = 10;
+const DISPLAY_VECTOR_SIZE: usize = 6;
 const DISPLAY_MATRIX_SIZE: usize = 10;
 
 impl Display for Vector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[")?;
 
-        let d = |a: &f32| format!("{:+03.6}", a);
+        let d = |a: &f32| format!("{:+011.6}", a);
 
         if self.data.len() <= DISPLAY_VECTOR_SIZE {
             for (i, data) in self.data.iter().enumerate() {
