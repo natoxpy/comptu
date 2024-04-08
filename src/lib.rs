@@ -7,6 +7,10 @@ use buffer::ComputeBuffer;
 use wgpu::util::DeviceExt;
 
 pub struct Context {
+    #[allow(dead_code)]
+    instance: wgpu::Instance,
+    #[allow(dead_code)]
+    adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
 }
@@ -45,7 +49,12 @@ impl Context {
             .await
             .unwrap();
 
-        Self { device, queue }
+        Self {
+            instance,
+            adapter,
+            device,
+            queue,
+        }
     }
 }
 
@@ -261,7 +270,14 @@ impl ComputeContext {
                     }
                 });
 
-                context.device.poll(wgpu::Maintain::Wait);
+                loop {
+                    match context.device.poll(wgpu::MaintainBase::Poll) {
+                        wgpu::MaintainResult::SubmissionQueueEmpty => break,
+                        wgpu::MaintainResult::Ok => {}
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
 
                 ComputeBuffer::new(
                     buffer_slice
@@ -292,20 +308,5 @@ impl ComputeContext {
         context.queue.submit(Some(encoder.finish()));
 
         self.read_output(context, buffers)
-
-        // let read_on_buffer = self.read_on_buffer(device);
-        // let write_on_buffer = self.write_on_buffer();
-
-        // encoder.copy_buffer_to_buffer(
-        //     write_on_buffer,
-        //     0,
-        //     &read_on_buffer,
-        //     0,
-        //     self.get_write_binding_size(),
-        // );
-
-        // context.queue.submit(Some(encoder.finish()));
-
-        // self.read_data(read_on_buffer, context)
     }
 }
