@@ -1,5 +1,9 @@
-use std::num::NonZeroU64;
+pub mod buffer;
+pub mod matrix;
 
+use std::sync::Arc;
+
+use buffer::ComputeBuffer;
 use wgpu::util::DeviceExt;
 
 pub struct Context {
@@ -23,13 +27,18 @@ impl Context {
             .await
             .unwrap();
 
+        let limits = wgpu::Limits {
+            max_storage_buffer_binding_size: i32::MAX as u32,
+            ..Default::default()
+        };
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: None,
                     required_features: wgpu::Features::TIMESTAMP_QUERY
                         | wgpu::Features::SPIRV_SHADER_PASSTHROUGH,
-                    required_limits: wgpu::Limits::default(),
+                    required_limits: limits,
                 },
                 None,
             )
@@ -42,13 +51,13 @@ impl Context {
 
 #[derive(Debug)]
 pub struct StorageBinding {
-    pub data: Vec<u8>,
+    pub data_buffer: ComputeBuffer,
     pub buffer: wgpu::Buffer,
 }
 
 impl StorageBinding {
-    pub fn new(context: &Context, data: Vec<u8>, output_buffer: bool) -> Self {
-        let mut usage = wgpu::BufferUsages::STORAGE;
+    pub fn new(context: &Context, compute_buffer: ComputeBuffer, output_buffer: bool) -> Self {
+        let mut usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
 
         if output_buffer {
             usage = usage | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
@@ -59,17 +68,17 @@ impl StorageBinding {
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: None,
-                    contents: data.as_slice(),
+                    contents: compute_buffer.data.as_slice(),
                     usage,
                 }),
-            data,
+            data_buffer: compute_buffer,
         }
     }
 
     pub fn new_empty(context: &Context, size: usize, output_buffer: bool) -> Self {
         let data = vec![0; size];
 
-        let mut usage = wgpu::BufferUsages::STORAGE;
+        let mut usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
 
         if output_buffer {
             usage = usage | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
@@ -83,15 +92,17 @@ impl StorageBinding {
                     contents: data.as_slice(),
                     usage,
                 }),
-            data,
+            data_buffer: ComputeBuffer::new(data),
         }
     }
 }
 
+const WRITE_BINDING: usize = 0;
+
 pub struct ComputeContext {
-    pub compute_shader: wgpu::ShaderModule,
+    pub compute_module: wgpu::ShaderModule,
     pub storage_bindings: Vec<StorageBinding>,
-    pub write_binding: usize,
+    pub workgroups: [u32; 3],
 }
 
 impl ComputeContext {
@@ -105,7 +116,7 @@ impl ComputeContext {
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     has_dynamic_offset: false,
-                    min_binding_size: Some(NonZeroU64::new(1).unwrap()),
+                    min_binding_size: None,
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
                 },
             })
@@ -145,15 +156,16 @@ impl ComputeContext {
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Compute pipeline"),
                 layout: Some(pipeline_layout),
-                module: &self.compute_shader,
+                module: &self.compute_module,
                 entry_point: "main",
             })
     }
 
     fn get_write_binding_size(&self) -> u64 {
         self.storage_bindings
-            .get(self.write_binding)
+            .get(WRITE_BINDING)
             .unwrap()
+            .data_buffer
             .data
             .len() as u64
     }
@@ -168,11 +180,7 @@ impl ComputeContext {
     }
 
     fn write_on_buffer(&self) -> &wgpu::Buffer {
-        &self
-            .storage_bindings
-            .get(self.write_binding)
-            .unwrap()
-            .buffer
+        &self.storage_bindings.get(WRITE_BINDING).unwrap().buffer
     }
 
     fn buffer_entries(&self) -> Vec<wgpu::BindGroupEntry> {
@@ -214,10 +222,14 @@ impl ComputeContext {
 
         compute_pass.set_bind_group(0, bind_group, &[]);
         compute_pass.set_pipeline(compute_pipeline);
-        compute_pass.dispatch_workgroups(1, 1, 1);
+        compute_pass.dispatch_workgroups(
+            self.workgroups[0],
+            self.workgroups[1],
+            self.workgroups[2],
+        );
     }
 
-    fn read_data(&self, read_on_buffer: wgpu::Buffer, device: &wgpu::Device) -> Vec<u8> {
+    fn read_data(&self, read_on_buffer: wgpu::Buffer, context: Arc<Context>) -> ComputeBuffer {
         let buffer_slice = read_on_buffer.slice(..);
 
         buffer_slice.map_async(wgpu::MapMode::Read, |x| {
@@ -226,25 +238,23 @@ impl ComputeContext {
             }
         });
 
-        device.poll(wgpu::Maintain::Wait);
+        context.device.poll(wgpu::Maintain::Wait);
 
-        buffer_slice
-            .get_mapped_range()
-            .chunks_exact(1)
-            .map(|b| {
-                let c: [u8; 1] = b.try_into().unwrap();
-                c[0]
-            })
-            .collect::<Vec<u8>>()
+        ComputeBuffer::new(
+            buffer_slice
+                .get_mapped_range()
+                .iter()
+                .cloned()
+                .collect::<Vec<u8>>(),
+        )
     }
 
-    pub async fn compute(&self, context: &Context) -> Vec<u8> {
+    pub async fn compute(&self, context: Arc<Context>) -> ComputeBuffer {
         let device = &context.device;
 
-        let bind_group_layout = self.bind_group_layout(context);
-
-        let pipeline_layout = self.pipeline_layout(&bind_group_layout, context);
-        let compute_pipeline = self.compute_pipeline(&pipeline_layout, context);
+        let bind_group_layout = self.bind_group_layout(&context);
+        let pipeline_layout = self.pipeline_layout(&bind_group_layout, &context);
+        let compute_pipeline = self.compute_pipeline(&pipeline_layout, &context);
 
         let bind_group = self.bind_group(&bind_group_layout, device);
 
@@ -265,6 +275,6 @@ impl ComputeContext {
 
         context.queue.submit(Some(encoder.finish()));
 
-        self.read_data(read_on_buffer, device)
+        self.read_data(read_on_buffer, context)
     }
 }

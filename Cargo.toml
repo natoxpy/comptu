@@ -6,5 +6,5 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+rand = "0.8.5"
 wgpu = { version = "0.19.3", features = ["spirv"] }
-tokio = "1.36.0"
