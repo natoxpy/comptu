@@ -7,4 +7,4 @@ edition = "2021"
 
 [dependencies]
 rand = "0.8.5"
-wgpu = { version = "0.19.3", features = ["spirv"] }
+wgpu = { version = "23.0.1", features = ["spirv"] }

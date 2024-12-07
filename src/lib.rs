@@ -4,7 +4,7 @@ pub mod matrix;
 use std::sync::Arc;
 
 use buffer::ComputeBuffer;
-use wgpu::util::DeviceExt;
+use wgpu::{util::DeviceExt, MemoryHints};
 
 pub struct Context {
     #[allow(dead_code)]
@@ -43,6 +43,7 @@ impl Context {
                     required_features: wgpu::Features::TIMESTAMP_QUERY
                         | wgpu::Features::SPIRV_SHADER_PASSTHROUGH,
                     required_limits: limits,
+                    memory_hints: MemoryHints::Performance,
                 },
                 None,
             )
@@ -107,7 +108,7 @@ impl StorageBinding {
 }
 
 pub struct ComputeContext {
-    pub compute_module: wgpu::ShaderModule,
+    pub compute_module: Arc<wgpu::ShaderModule>,
     pub storage_bindings: Vec<StorageBinding>,
     pub write_bindings: Vec<StorageBinding>,
     pub workgroups: [u32; 3],
@@ -172,7 +173,9 @@ impl ComputeContext {
                 label: Some("Compute pipeline"),
                 layout: Some(pipeline_layout),
                 module: &self.compute_module,
-                entry_point: "main",
+                entry_point: Some(&String::from("main")),
+                cache: None,
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             })
     }
 
